@@ -9,6 +9,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC
 import Control.Concurrent.MVar
 import Control.Concurrent
+import Control.Monad
 
 iconPrefix     = "/usr/share/icons/gnome/scalable/status/"
 battFullip     = iconPrefix ++ "battery-full-charged-symbolic.svg"
@@ -27,6 +28,9 @@ battCapFile       = battDir ++ "capacity"
 battStatFile      = battDir ++ "status"
 battEnergyNowFile = battDir ++ "energy_now"
 
+-- This is how long we wait in seconds between battery energy level samples.
+-- The longer we wait the more accurate but also the more out of date the rate
+-- used when it is finally used. This should be tuned.
 delay = 10
 
 normalizeCapacity :: B.ByteString -> Int
@@ -34,6 +38,9 @@ normalizeCapacity rawCapacity =
   case (BC.readInt rawCapacity) of
     Just (i,_) -> i
     _ -> 0
+
+normalizeEnergy :: B.ByteString -> Int
+normalizeEnergy = normalizeCapacity
 
 normalizeStatus :: B.ByteString -> String
 normalizeStatus rawStatus =
@@ -44,21 +51,6 @@ normalizeStatus rawStatus =
   else
     fs
     
-battTimeRemaining :: Int -> B.ByteString -> B.ByteString -> String
-battTimeRemaining d en1 en2 =
-  case ((BC.readInt en1),(BC.readInt en2)) of
-    ((Just (i1,_)),(Just (i2,_))) ->
-      let ts = ((3600 * fromIntegral i2) / (fromIntegral (i1 - i2)*((60/fromIntegral d)*60))) in
-      let h = floor (ts / 3600) :: Int in
-      let m = floor ((ts - (fromIntegral h*3600))/60) :: Int in
-      let s = floor ((ts - (fromIntegral h*3600) - (fromIntegral m*60))/60) :: Int in
-      printf ", %02d:%02d:%02d remaining" h m s
-    (_,_) -> "" 
-
-tooltip :: B.ByteString -> B.ByteString -> B.ByteString -> B.ByteString -> Int -> String
-tooltip status capacity e1 e2 d = 
-  printf "%s:%d%%%s" (normalizeStatus status) (normalizeCapacity capacity) (battTimeRemaining d e1 e2) 
-
 chooseIcon :: B.ByteString -> B.ByteString -> String
 chooseIcon rawStatus rawCapacity =
   let status = normalizeStatus rawStatus in
@@ -77,58 +69,57 @@ chooseIcon rawStatus rawCapacity =
   (x,y) | x < 10 && y == "Discharging" -> battEmptyip
   (_,_)                                -> battEmptyip -- Should probably have a question-mark icon for this unknown case
 
---tooltipUpdater :: MVar String -> IO Bool 
---tooltipUpdater mv = do
---  rawCapacity   <- B.readFile battCapFile 
---  rawStatus     <- B.readFile battStatFile 
---  rawEnergynow1 <- B.readFile battEnergyNowFile
---  threadDelay (1000000 * delay) 
---  rawEnergynow2 <- B.readFile battEnergyNowFile
---  modifyMVar_ mv (\_ -> return (tooltip rawStatus rawCapacity rawEnergynow1 rawEnergynow2 delay))
---  return True
+getTooltipText :: Float -> B.ByteString -> B.ByteString -> B.ByteString -> String
+getTooltipText drainRate rawEnergyNow stat cap =
+  let nstat = normalizeStatus stat in
+  let ncap = normalizeCapacity cap in
+  let energyNow = normalizeEnergy rawEnergyNow in
+  let ts = ((3600 * (fromIntegral energyNow)) / drainRate) in
+  let h = floor (ts / 3600) :: Int in
+  let m = floor ((ts - (fromIntegral h*3600))/60) :: Int in
+  let s = floor ((ts - (fromIntegral h*3600) - (fromIntegral m*60))/60) :: Int in
+  case nstat of
+    "Discharging" -> printf "Discharging:%d%%, %02d:%02d:%02d remaining" ncap h m s
+    x -> printf "%s:%d%%" x ncap
 
-tooltipUpdater2 :: MVar String -> IO () 
-tooltipUpdater2 mv = do
-  rawCapacity   <- B.readFile battCapFile 
-  rawStatus     <- B.readFile battStatFile 
-  rawEnergynow1 <- B.readFile battEnergyNowFile
-  threadDelay (1000000 * delay) 
-  rawEnergynow2 <- B.readFile battEnergyNowFile
-  modifyMVar_ mv (\_ -> return (tooltip rawStatus rawCapacity rawEnergynow1 rawEnergynow2 delay))
-  tooltipUpdater2 mv
-
-getIconPath :: IO String
-getIconPath = do
-  rawCapacity   <- B.readFile battCapFile 
-  rawStatus     <- B.readFile battStatFile 
-  return (chooseIcon rawStatus rawCapacity) 
-
-iconUpdater :: StatusIcon -> MVar String -> IO Bool
+iconUpdater :: StatusIcon -> MVar Float -> IO Bool
 iconUpdater si mv = do
-  toolTip <- readMVar mv
-  statusIconSetTooltip si toolTip
-  iconPath <- getIconPath
-  statusIconSetFromFile si iconPath
+  rawCapacity   <- B.readFile battCapFile 
+  rawStatus     <- B.readFile battStatFile 
+  rawEnergyNow  <- B.readFile battEnergyNowFile
+  drainRate     <- readMVar mv 
+  statusIconSetFromFile si (chooseIcon rawStatus rawCapacity)
+  statusIconSetTooltip si (getTooltipText drainRate rawEnergyNow rawStatus rawCapacity) 
   return True 
+
+battDrainRate :: Int -> B.ByteString -> B.ByteString -> Float 
+battDrainRate d en1 en2 =
+  case ((BC.readInt en1),(BC.readInt en2)) of
+    ((Just (i1,_)),(Just (i2,_))) -> (fromIntegral (i1 - i2)*((60/fromIntegral d)*60)) 
+    (_,_) -> 0
+
+tooltipUpdater :: MVar Float -> IO () 
+tooltipUpdater mv = do
+  rawEnergyNow1 <- B.readFile battEnergyNowFile
+  threadDelay (1000000 * delay) 
+  rawEnergyNow2 <- B.readFile battEnergyNowFile
+  modifyMVar_ mv (\_ -> (return (battDrainRate delay rawEnergyNow1 rawEnergyNow2)))
 
 main :: IO ()
 main = do
-  mv <- newMVar "test"
+  drainRateMV <- newMVar 0.0 
   initGUI
   si <- statusIconNewFromStock stockQuit
-  iconUpdater si mv
+  iconUpdater si drainRateMV 
   statusIconSetVisible si True
-  ti0 <- timeoutAdd (yield >> return True) 50 
-  --ti1 <- timeoutAdd (tooltipUpdater mv) 15000
-  ti2 <- timeoutAdd (iconUpdater si mv) 5000
-  forkIO (tooltipUpdater2 mv) 
+  ti0 <- timeoutAdd (yield >> return True) 50   -- Gives tooltipUpdater thread a chance to run 
+  ti2 <- timeoutAdd (iconUpdater si drainRateMV) 5000
+  forkIO (forever $ tooltipUpdater drainRateMV) 
   menu <- mkmenu si
   on si statusIconPopupMenu $ \b a -> do
          widgetShowAll menu
          print (b,a)
          menuPopup menu $ maybe Nothing (\b' -> Just (b',a)) b
-  --on si statusIconActivate $ do
-  --       putStrLn "'activate' signal triggered"
   mainGUI
 
 mkmenu s = do
