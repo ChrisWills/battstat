@@ -1,5 +1,4 @@
 import System.IO
-import Control.Concurrent (threadDelay)
 import Control.DeepSeq (rnf)
 import Data.Time.Clock
 import Graphics.UI.Gtk
@@ -7,8 +6,8 @@ import Text.Printf
 import Text.Regex.PCRE
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC
-import Control.Concurrent.MVar
 import Control.Concurrent
+import Control.Concurrent.MVar
 import Control.Monad
 
 iconPrefix     = "/usr/share/icons/gnome/scalable/status/"
@@ -35,7 +34,7 @@ delay = 10
 
 normalizeCapacity :: B.ByteString -> Int
 normalizeCapacity rawCapacity = 
-  case (BC.readInt rawCapacity) of
+  case BC.readInt rawCapacity of
     Just (i,_) -> i
     _ -> 0
 
@@ -46,7 +45,7 @@ normalizeStatus :: B.ByteString -> String
 normalizeStatus rawStatus =
   let s = BC.unpack rawStatus in
   let fs = (s =~ "[^\n]*" :: String) in
-  if (fs == "Unknown") then 
+  if fs == "Unknown" then 
     "Charging"
   else
     fs
@@ -74,7 +73,7 @@ getTooltipText drainRate rawEnergyNow stat cap =
   let nstat = normalizeStatus stat in
   let ncap = normalizeCapacity cap in
   let energyNow = normalizeEnergy rawEnergyNow in
-  let ts = ((3600 * (fromIntegral energyNow)) / drainRate) in
+  let ts = ((3600 * fromIntegral energyNow) / drainRate) in
   let h = floor (ts / 3600) :: Int in
   let m = floor ((ts - (fromIntegral h*3600))/60) :: Int in
   let s = floor ((ts - (fromIntegral h*3600) - (fromIntegral m*60))/60) :: Int in
@@ -94,8 +93,8 @@ iconUpdater si mv = do
 
 battDrainRate :: Int -> B.ByteString -> B.ByteString -> Float 
 battDrainRate d en1 en2 =
-  case ((BC.readInt en1),(BC.readInt en2)) of
-    ((Just (i1,_)),(Just (i2,_))) -> (fromIntegral (i1 - i2)*((60/fromIntegral d)*60)) 
+  case (BC.readInt en1, BC.readInt en2) of
+    (Just (i1,_),Just (i2,_)) -> fromIntegral (i1 - i2)*((60/fromIntegral d)*60) 
     (_,_) -> 0
 
 tooltipUpdater :: MVar Float -> IO () 
@@ -103,7 +102,7 @@ tooltipUpdater mv = do
   rawEnergyNow1 <- B.readFile battEnergyNowFile
   threadDelay (1000000 * delay) 
   rawEnergyNow2 <- B.readFile battEnergyNowFile
-  modifyMVar_ mv (\_ -> (return (battDrainRate delay rawEnergyNow1 rawEnergyNow2)))
+  modifyMVar_ mv (\_ -> return (battDrainRate delay rawEnergyNow1 rawEnergyNow2))
 
 main :: IO ()
 main = do
